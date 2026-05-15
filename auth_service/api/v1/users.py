@@ -6,6 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from core.security import decode_token
 from db.postgres import get_pool
 from schemas.user import FriendRequest, FriendshipOut, UserOut
+from services import notifier
 
 router = APIRouter()
 bearer = HTTPBearer()
@@ -68,6 +69,14 @@ async def send_friend_request(
                VALUES ($1, $2) RETURNING id, requester_id, addressee_id, status, created_at""",
             user_id, body.addressee_id,
         )
+    await notifier.publish(
+        "friend.request",
+        {
+            "event": "friend.request",
+            "requester_id": str(user_id),
+            "addressee_id": str(body.addressee_id),
+        },
+    )
     return dict(row)
 
 
@@ -86,6 +95,14 @@ async def accept_friend_request(
         )
     if not row:
         raise HTTPException(status_code=404, detail="Friendship request not found")
+    await notifier.publish(
+        "friend.accepted",
+        {
+            "event": "friend.accepted",
+            "requester_id": str(row["requester_id"]),
+            "addressee_id": str(row["addressee_id"]),
+        },
+    )
     return dict(row)
 
 

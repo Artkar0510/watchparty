@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
+import sentry_sdk
 from fastapi import FastAPI
 
 from api.v1 import v1_router
@@ -29,6 +30,13 @@ async def lifespan(app: FastAPI):
 
 
 settings = get_settings()
+
+if settings.sentry.dsn:
+    sentry_sdk.init(
+        dsn=settings.sentry.dsn,
+        environment=settings.sentry.environment,
+        traces_sample_rate=settings.sentry.traces_sample_rate,
+    )
 
 app = FastAPI(
     title="Content Service",

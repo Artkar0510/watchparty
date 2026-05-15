@@ -5,7 +5,7 @@ import httpx
 
 from core.settings import get_settings
 from schemas.session import SessionCreate, SessionOut
-from services import session_manager
+from services import notifier, session_manager
 
 router = APIRouter()
 bearer = HTTPBearer()
@@ -33,6 +33,16 @@ async def create_session(
         film_id=body.film_id,
         host_id=user_id,
         invited=body.invited_user_ids,
+    )
+    await notifier.publish(
+        "session.created",
+        {
+            "event": "session.created",
+            "session_id": session["session_id"],
+            "film_id": session["film_id"],
+            "host_id": session["host_id"],
+            "invited_user_ids": body.invited_user_ids,
+        },
     )
     return session
 

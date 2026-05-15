@@ -12,3 +12,4 @@ alembic==1.13.3
 SQLAlchemy==2.0.35
 psycopg2-binary==2.9.9
 sentry-sdk[fastapi]==2.17.0
+aio-pika==9.4.3

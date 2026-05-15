@@ -49,6 +49,12 @@ class AuthSettings(BaseModel):
     service_url: str = "http://localhost:8001"
 
 
+class SentrySettings(BaseModel):
+    dsn: str | None = None
+    environment: str = "development"
+    traces_sample_rate: float = 0.0
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_nested_delimiter="__",
@@ -62,6 +68,7 @@ class Settings(BaseSettings):
     elasticsearch: ElasticsearchSettings = Field(default_factory=ElasticsearchSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
+    sentry: SentrySettings = Field(default_factory=SentrySettings)
 
 
 @lru_cache(maxsize=1)
