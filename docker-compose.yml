@@ -38,6 +38,31 @@ services:
       timeout: 3s
       retries: 10
 
+  mongo:
+    image: mongo:7.0
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_DATABASE:-ugc_db}
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   auth-service:
     build: ./auth_service
     environment:
@@ -48,12 +73,19 @@ services:
       POSTGRESQL__DATABASE: auth_db
       REDIS__HOST: redis
       REDIS__PORT: 6379
+      RABBIT__HOST: rabbitmq
+      RABBIT__USER: ${RABBITMQ_USER:-guest}
+      RABBIT__PASSWORD: ${RABBITMQ_PASSWORD:-guest}
       APP__SECRET_KEY: ${SECRET_KEY:-supersecretkey}
       APP__DEBUG: ${DEBUG:-false}
+      SENTRY__DSN: ${SENTRY_DSN:-}
+      SENTRY__ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
 
   content-service:
@@ -69,6 +101,8 @@ services:
       REDIS__HOST: redis
       REDIS__PORT: 6379
       AUTH__SERVICE_URL: http://auth-service:8000
+      SENTRY__DSN: ${SENTRY_DSN:-}
+      SENTRY__ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
     depends_on:
       postgres:
         condition: service_healthy
@@ -88,11 +122,69 @@ services:
       REDIS__PORT: 6379
       AUTH__SERVICE_URL: http://auth-service:8000
       CONTENT__SERVICE_URL: http://content-service:8000
+      RABBIT__HOST: rabbitmq
+      RABBIT__USER: ${RABBITMQ_USER:-guest}
+      RABBIT__PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      SENTRY__DSN: ${SENTRY_DSN:-}
+      SENTRY__ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
     depends_on:
       redis:
         condition: service_healthy
       auth-service:
         condition: service_started
+      rabbitmq:
+        condition: service_healthy
+
+  ugc-service:
+    build: ./ugc_service
+    environment:
+      MONGO__HOST: mongo
+      MONGO__PORT: 27017
+      MONGO__DATABASE: ${MONGO_DATABASE:-ugc_db}
+      AUTH__SERVICE_URL: http://auth-service:8000
+      RABBIT__HOST: rabbitmq
+      RABBIT__USER: ${RABBITMQ_USER:-guest}
+      RABBIT__PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      SENTRY__DSN: ${SENTRY_DSN:-}
+      SENTRY__ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
+    depends_on:
+      mongo:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+
+  notification-service:
+    build: ./notification_service
+    environment:
+      REDIS__HOST: redis
+      REDIS__PORT: 6379
+      AUTH__SERVICE_URL: http://auth-service:8000
+      SENTRY__DSN: ${SENTRY_DSN:-}
+      SENTRY__ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+
+  notification-worker:
+    build: ./notification_service
+    environment:
+      WORKER_MODE: "1"
+      REDIS__HOST: redis
+      REDIS__PORT: 6379
+      RABBIT__HOST: rabbitmq
+      RABBIT__USER: ${RABBITMQ_USER:-guest}
+      RABBIT__PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      SENTRY__DSN: ${SENTRY_DSN:-}
+      SENTRY__ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
   admin-service:
     build: ./admin_service
@@ -146,10 +238,14 @@ services:
       - auth-service
       - content-service
       - together-service
+      - ugc-service
+      - notification-service
       - admin-service
 
 volumes:
   postgres_data:
   elasticsearch_data:
   redis_data:
+  mongo_data:
+  rabbitmq_data:
   static_volume:
