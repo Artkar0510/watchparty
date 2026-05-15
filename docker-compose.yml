@@ -1,0 +1,155 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init_db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  elasticsearch:
+    image: elasticsearch:8.17.3
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q 'green\\|yellow'"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+
+  redis:
+    image: redis:7.2-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  auth-service:
+    build: ./auth_service
+    environment:
+      POSTGRESQL__HOST: postgres
+      POSTGRESQL__PORT: 5432
+      POSTGRESQL__USER: ${POSTGRES_USER:-admin}
+      POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRESQL__DATABASE: auth_db
+      REDIS__HOST: redis
+      REDIS__PORT: 6379
+      APP__SECRET_KEY: ${SECRET_KEY:-supersecretkey}
+      APP__DEBUG: ${DEBUG:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  content-service:
+    build: ./content_service
+    environment:
+      POSTGRESQL__HOST: postgres
+      POSTGRESQL__PORT: 5432
+      POSTGRESQL__USER: ${POSTGRES_USER:-admin}
+      POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRESQL__DATABASE: content_db
+      ELASTICSEARCH__HOST: elasticsearch
+      ELASTICSEARCH__PORT: 9200
+      REDIS__HOST: redis
+      REDIS__PORT: 6379
+      AUTH__SERVICE_URL: http://auth-service:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      admin-service:
+        condition: service_healthy
+
+  together-service:
+    build: ./together_service
+    environment:
+      REDIS__HOST: redis
+      REDIS__PORT: 6379
+      AUTH__SERVICE_URL: http://auth-service:8000
+      CONTENT__SERVICE_URL: http://content-service:8000
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+
+  admin-service:
+    build: ./admin_service
+    environment:
+      DJANGO_SECRET_KEY: ${SECRET_KEY:-supersecretkey}
+      DB_NAME: content_db
+      DB_USER: ${POSTGRES_USER:-admin}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DEBUG: ${DEBUG:-False}
+      ALLOWED_HOSTS: localhost,127.0.0.1,admin-service
+    volumes:
+      - static_volume:/var/www/static
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/admin/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  etl:
+    build: ./etl
+    environment:
+      POSTGRESQL__HOST: postgres
+      POSTGRESQL__PORT: 5432
+      POSTGRESQL__USER: ${POSTGRES_USER:-admin}
+      POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRESQL__DATABASE: content_db
+      ELASTICSEARCH__HOST: elasticsearch
+      ELASTICSEARCH__PORT: 9200
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      admin-service:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.25-alpine
+    ports:
+      - "8000:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - static_volume:/var/www/static:ro
+    depends_on:
+      - auth-service
+      - content-service
+      - together-service
+      - admin-service
+
+volumes:
+  postgres_data:
+  elasticsearch_data:
+  redis_data:
+  static_volume:

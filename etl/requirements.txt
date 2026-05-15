@@ -1,0 +1,4 @@
+psycopg[binary]==3.2.3
+elasticsearch==8.15.1
+pydantic-settings==2.5.2
+pydantic==2.9.2
