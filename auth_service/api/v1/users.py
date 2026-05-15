@@ -34,6 +34,22 @@ async def get_me(user_id: UUID = Depends(get_current_user_id)):
     return dict(row)
 
 
+@router.get("/search")
+async def search_users(q: str, user_id: UUID = Depends(get_current_user_id)):
+    """Find users by username substring (excluding myself), max 20."""
+    if len(q.strip()) < 2:
+        return []
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, username, email FROM users
+               WHERE username ILIKE $1 AND id != $2
+               ORDER BY username LIMIT 20""",
+            f"%{q.strip()}%", user_id,
+        )
+    return [{"id": str(r["id"]), "username": r["username"], "email": r["email"]} for r in rows]
+
+
 @router.get("/{user_id}", response_model=UserOut)
 async def get_user(user_id: UUID):
     pool = get_pool()
@@ -138,3 +154,27 @@ async def get_friend_ids(user_id: UUID = Depends(get_current_user_id)):
             user_id,
         )
     return [str(r["friend_id"]) for r in rows]
+
+
+@router.get("/friends/pending")
+async def get_pending_requests(user_id: UUID = Depends(get_current_user_id)):
+    """Friend requests awaiting my acceptance + friendship_id and requester username."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT f.id AS friendship_id, u.id AS requester_id, u.username, f.created_at
+               FROM friendships f
+               JOIN users u ON u.id = f.requester_id
+               WHERE f.addressee_id=$1 AND f.status='pending'
+               ORDER BY f.created_at DESC""",
+            user_id,
+        )
+    return [
+        {
+            "friendship_id": str(r["friendship_id"]),
+            "requester_id": str(r["requester_id"]),
+            "username": r["username"],
+            "created_at": r["created_at"].isoformat(),
+        }
+        for r in rows
+    ]
