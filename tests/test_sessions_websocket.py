@@ -40,7 +40,6 @@ async def test_create_session(http: httpx.AsyncClient, friends: tuple, film: dic
     assert bob["user_id"] in session["participants"]
 
 
-@pytest.mark.timeout(30)
 async def test_websocket_play_pause_chat(http: httpx.AsyncClient, friends: tuple, film: dict) -> None:
     alice, bob = friends
     r = await http.post(

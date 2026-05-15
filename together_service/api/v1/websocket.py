@@ -203,8 +203,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
     except Exception:
         logger.exception("WS handler error user=%s session=%s", user_id, session_id)
     finally:
+        # Drop the local socket but keep the user in the session participant set —
+        # they remain a member (and can fetch chat history) even after disconnect.
         _local_connections.get(session_id, {}).pop(user_id, None)
-        await session_manager.remove_participant(session_id, user_id)
         leave_event = {"type": "leave", "user_id": user_id, "timestamp": _now()}
         try:
             await session_manager.publish_event(session_id, leave_event)

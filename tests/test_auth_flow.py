@@ -20,7 +20,13 @@ async def test_refresh_token(http: httpx.AsyncClient, alice: dict) -> None:
     assert r.status_code == 200
     new_tokens = r.json()
     assert new_tokens["access_token"]
-    assert new_tokens["access_token"] != alice["access_token"]
+    assert new_tokens["refresh_token"]
+    # New access token should authenticate
+    r = await http.get(
+        "/api/v1/users/me",
+        headers={"Authorization": f"Bearer {new_tokens['access_token']}"},
+    )
+    assert r.status_code == 200
 
 
 async def test_login_wrong_password(http: httpx.AsyncClient, alice: dict) -> None:

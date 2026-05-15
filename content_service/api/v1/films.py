@@ -1,5 +1,6 @@
 import json
-from uuid import UUID
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -102,20 +103,24 @@ async def get_film(film_id: UUID):
 
 @router.post("", response_model=FilmOut, status_code=status.HTTP_201_CREATED)
 async def create_film(body: FilmCreate):
+    # Django manages film_work without DB-level defaults for id/created_at/updated_at
+    # (those live on the model, not the column), so we generate them here.
+    film_id = uuid4()
+    now = datetime.now(timezone.utc)
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             film = await conn.fetchrow(
-                """INSERT INTO film_work (title, description, rating, type)
-                   VALUES ($1, $2, $3, $4)
+                """INSERT INTO film_work (id, title, description, rating, type, created_at, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $6)
                    RETURNING id, title, description, rating, type, created_at, updated_at""",
-                body.title, body.description, body.rating, body.type,
+                film_id, body.title, body.description, body.rating, body.type, now,
             )
-            film_id = film["id"]
             for genre_id in body.genre_ids:
                 await conn.execute(
-                    "INSERT INTO genre_film_work (film_work_id, genre_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                    film_id, genre_id,
+                    """INSERT INTO genre_film_work (id, film_work_id, genre_id)
+                       VALUES ($1, $2, $3) ON CONFLICT DO NOTHING""",
+                    uuid4(), film_id, genre_id,
                 )
 
     es = get_es()

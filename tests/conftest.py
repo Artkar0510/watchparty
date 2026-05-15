@@ -34,18 +34,19 @@ async def _wait_healthy(client: httpx.AsyncClient, path: str) -> None:
     raise RuntimeError(f"Service at {path} did not become healthy in {HEALTH_TIMEOUT}s")
 
 
-@pytest_asyncio.fixture(scope="session")
+_stack_ready = False
+
+
+@pytest_asyncio.fixture
 async def http() -> httpx.AsyncClient:
+    global _stack_ready
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=15.0) as client:
+        if not _stack_ready:
+            for path in ("/health/auth", "/health/content", "/health/together",
+                         "/health/ugc", "/health/notification"):
+                await _wait_healthy(client, path)
+            _stack_ready = True
         yield client
-
-
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def _wait_for_stack(http: httpx.AsyncClient) -> None:
-    """Wait for every service to report /health=200 before running tests."""
-    for path in ("/health/auth", "/health/content", "/health/together",
-                 "/health/ugc", "/health/notification"):
-        await _wait_healthy(http, path)
 
 
 async def _register_and_login(http: httpx.AsyncClient) -> dict:
