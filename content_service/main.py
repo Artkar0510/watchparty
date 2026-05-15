@@ -1,20 +1,28 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from api.v1 import v1_router
+from core.logger import setup_logging
 from core.settings import get_settings
 from db.elasticsearch import close_elasticsearch, init_elasticsearch
 from db.postgres import close_db, init_db
 from db.redis import close_redis, init_redis
 
+setup_logging()
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("content-service starting")
     await init_db()
     await init_redis()
     await init_elasticsearch()
+    logger.info("content-service ready")
     yield
+    logger.info("content-service shutting down")
     await close_elasticsearch()
     await close_redis()
     await close_db()

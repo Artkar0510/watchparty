@@ -11,14 +11,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core.logger import setup_logging
 from core.settings import get_settings
 from extractors.postgres import extract_films
 from loaders.elasticsearch import bulk_load, ensure_index, get_client
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [ETL] %(levelname)s %(message)s",
-)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 
