@@ -1,7 +1,46 @@
 // === Кино вместе SPA ===
 // Vanilla JS, hash-based routing, talks to nginx-proxied API on same origin.
 
-const DEMO_VIDEO = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+// Fallback для фильмов без video_url. Берём локальный MP4 из nginx volume
+// (frontend/videos/sample.mp4), чтобы плеер всегда что-то играл, не дёргая
+// внешний CDN.
+const DEMO_VIDEO = "/videos/sample.mp4";
+
+// Распознаём YouTube-ссылки (watch?v=ID, youtu.be/ID, embed/ID).
+// Для YouTube тег <video> не работает — нужен <iframe> embed.
+function parseYouTubeId(url) {
+  if (!url) return null;
+  const patterns = [
+    /[?&]v=([a-zA-Z0-9_-]{11})/,         // youtube.com/watch?v=ID
+    /youtu\.be\/([a-zA-Z0-9_-]{11})/,    // youtu.be/ID
+    /youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/, // youtube.com/embed/ID
+  ];
+  for (const re of patterns) {
+    const m = url.match(re);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+// Лениво грузим YouTube IFrame API один раз на всё приложение, отдаём Promise
+// с глобальным YT. Без него new YT.Player(...) не существует.
+// https://developers.google.com/youtube/iframe_api_reference
+let _ytApiPromise = null;
+function loadYouTubeApi() {
+  if (_ytApiPromise) return _ytApiPromise;
+  _ytApiPromise = new Promise((resolve) => {
+    if (window.YT && window.YT.Player) return resolve(window.YT);
+    const prev = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      if (prev) try { prev(); } catch {}
+      resolve(window.YT);
+    };
+    const tag = document.createElement("script");
+    tag.src = "https://www.youtube.com/iframe_api";
+    document.head.appendChild(tag);
+  });
+  return _ytApiPromise;
+}
 const DEMO_FILMS = [
   { title: "Big Buck Bunny",      description: "Открытый короткометражный мультфильм Blender Foundation.", rating: 7.8, type: "movie" },
   { title: "Sintel",              description: "Эпический короткий фильм Blender Foundation.",            rating: 8.1, type: "movie" },
@@ -540,7 +579,15 @@ function startNotifPolling() {
 function viewWatch(sessionId) {
   if (state.ws) try { state.ws.close(); } catch {}
 
-  const video = el("video", { controls: true, src: DEMO_VIDEO, preload: "metadata" });
+  // Контейнер, в который воткнём либо <video>, либо YouTube iframe.
+  const playerHost = el("div", { class: "player-host" });
+  // Унифицированное API над плеером: реализуется по-разному для html5/YT,
+  // но снаружи код один. Null до завершения загрузки.
+  let playerCtl = null;
+  // Локальный публикатор play/pause/seek в WS. Перепишется на боевую
+  // реализацию когда WS готов; до тех пор тихо игнорируем.
+  let publishLocal = () => {};
+
   const sessionLabel = el("span", { class: "session-id" }, sessionId);
   const partsLabel = el("span", { class: "participants" }, "Участники: загрузка...");
   const copyBtn = el("button", { class: "ghost", onclick: () => {
@@ -554,7 +601,7 @@ function viewWatch(sessionId) {
   }}, "Выйти");
 
   const playerPane = el("div", { class: "player-pane" },
-    video,
+    playerHost,
     el("div", { class: "player-info" }, partsLabel, sessionLabel, copyBtn, leaveBtn),
   );
 
@@ -573,25 +620,143 @@ function viewWatch(sessionId) {
     el("footer", {}, chatInput, chatSend),
   );
 
-  // Load session + chat history first
+  // ---- Factories: html5 video & YouTube IFrame Player ----
+
+  function makeHtml5Player(url) {
+    const video = el("video", { controls: true, src: url, preload: "metadata" });
+    playerHost.replaceChildren(video);
+
+    const ctl = {
+      play() {
+        state.applyingRemote = true;
+        video.play().catch(() => {});
+        setTimeout(() => state.applyingRemote = false, 200);
+      },
+      pause() {
+        state.applyingRemote = true;
+        video.pause();
+        setTimeout(() => state.applyingRemote = false, 200);
+      },
+      seek(t) {
+        state.applyingRemote = true;
+        video.currentTime = t;
+        setTimeout(() => state.applyingRemote = false, 200);
+      },
+      getPos() { return video.currentTime || 0; },
+    };
+
+    // Локальные действия пользователя → публикуем в WS (если не remote).
+    video.addEventListener("play",  () => publishLocal("play",  video.currentTime));
+    video.addEventListener("pause", () => publishLocal("pause", video.currentTime));
+    let lastSeek = 0;
+    video.addEventListener("seeked", () => {
+      const now = Date.now();
+      if (now - lastSeek < 200) return; // dedupe
+      lastSeek = now;
+      publishLocal("seek", video.currentTime);
+    });
+
+    return ctl;
+  }
+
+  async function makeYouTubePlayer(videoId) {
+    // YT.Player заменит этот div на <iframe>. Контейнер обёртка нужна, чтобы
+    // CSS-правило .youtube-embed применилось к итоговому iframe (см. onReady).
+    const host = el("div", {});
+    playerHost.replaceChildren(host);
+    const YT = await loadYouTubeApi();
+
+    return await new Promise((resolve) => {
+      const player = new YT.Player(host, {
+        videoId,
+        playerVars: { rel: 0, modestbranding: 1, playsinline: 1 },
+        events: {
+          onReady: () => {
+            const iframe = player.getIframe && player.getIframe();
+            if (iframe) iframe.className = "youtube-embed";
+
+            // Seek-детект: YouTube API не шлёт явного "seeked" события.
+            // Раз в 500мс сверяем текущую позицию с ожидаемой (prev + dt
+            // если playing). Прыжок > 1 секунды считаем seek'ом.
+            let prevPos = 0, prevTs = Date.now(), prevState = -1;
+            setInterval(() => {
+              if (state.applyingRemote) {
+                prevPos = player.getCurrentTime();
+                prevTs = Date.now();
+                prevState = player.getPlayerState();
+                return;
+              }
+              const ps = player.getPlayerState();
+              const pos = player.getCurrentTime();
+              const now = Date.now();
+              if (prevState === YT.PlayerState.PLAYING) {
+                const expected = prevPos + (now - prevTs) / 1000;
+                if (Math.abs(pos - expected) > 1.0) {
+                  publishLocal("seek", pos);
+                }
+              }
+              prevPos = pos; prevTs = now; prevState = ps;
+            }, 500);
+
+            resolve({
+              play() {
+                state.applyingRemote = true;
+                player.playVideo();
+                setTimeout(() => state.applyingRemote = false, 400);
+              },
+              pause() {
+                state.applyingRemote = true;
+                player.pauseVideo();
+                setTimeout(() => state.applyingRemote = false, 400);
+              },
+              seek(t) {
+                state.applyingRemote = true;
+                player.seekTo(t, true);
+                setTimeout(() => state.applyingRemote = false, 400);
+              },
+              getPos() {
+                try { return player.getCurrentTime() || 0; } catch { return 0; }
+              },
+            });
+          },
+          onStateChange: (ev) => {
+            if (ev.data === YT.PlayerState.PLAYING) {
+              publishLocal("play",  player.getCurrentTime());
+            } else if (ev.data === YT.PlayerState.PAUSED) {
+              publishLocal("pause", player.getCurrentTime());
+            }
+          },
+        },
+      });
+    });
+  }
+
+  // ---- Load session + chat history, then construct the right player ----
   (async () => {
     try {
       const session = await api(`/api/v1/sessions/${sessionId}`);
+      // Подтягиваем фильм, чтобы взять video_url. Локальные пути вида
+      // "/videos/foo.mp4" обслуживает nginx; YouTube ссылки идут в IFrame API.
+      let videoUrl = DEMO_VIDEO;
+      try {
+        const film = await api(`/api/v1/films/${session.film_id}`);
+        videoUrl = film.video_url || DEMO_VIDEO;
+      } catch { /* fallback to DEMO_VIDEO */ }
+
+      const ytId = parseYouTubeId(videoUrl);
+      playerCtl = ytId
+        ? await makeYouTubePlayer(ytId)
+        : makeHtml5Player(videoUrl);
+
       const usernames = await Promise.all(session.participants.map(fetchUsername));
       partsLabel.textContent = "Участники: " + usernames.join(", ");
       const history = await api(`/api/v1/sessions/${sessionId}/chat`);
       for (const m of history) await appendChat(m, false);
 
-      // Apply current playback state
+      // Apply current playback state — единый интерфейс для обоих режимов.
+      if (session.position) playerCtl.seek(session.position);
       if (session.state === "playing") {
-        state.applyingRemote = true;
-        video.currentTime = session.position || 0;
-        video.play().catch(() => {});
-        setTimeout(() => state.applyingRemote = false, 200);
-      } else {
-        state.applyingRemote = true;
-        video.currentTime = session.position || 0;
-        setTimeout(() => state.applyingRemote = false, 200);
+        try { playerCtl.play(); } catch {}
       }
     } catch (e) { toast("Не удалось загрузить сессию: " + e.message, "error"); }
     connectWS();
@@ -608,21 +773,19 @@ function viewWatch(sessionId) {
       const msg = JSON.parse(ev.data);
       const username = msg.user_id ? await fetchUsername(msg.user_id) : "";
       if (msg.type === "play") {
-        state.applyingRemote = true;
-        if (Math.abs(video.currentTime - msg.position) > 0.5) video.currentTime = msg.position;
-        video.play().catch(() => {});
-        setTimeout(() => state.applyingRemote = false, 200);
+        if (playerCtl) {
+          if (Math.abs(playerCtl.getPos() - msg.position) > 0.5) playerCtl.seek(msg.position);
+          playerCtl.play();
+        }
         appendSystem(`${username} включил воспроизведение`);
       } else if (msg.type === "pause") {
-        state.applyingRemote = true;
-        if (Math.abs(video.currentTime - msg.position) > 0.5) video.currentTime = msg.position;
-        video.pause();
-        setTimeout(() => state.applyingRemote = false, 200);
+        if (playerCtl) {
+          if (Math.abs(playerCtl.getPos() - msg.position) > 0.5) playerCtl.seek(msg.position);
+          playerCtl.pause();
+        }
         appendSystem(`${username} поставил на паузу`);
       } else if (msg.type === "seek") {
-        state.applyingRemote = true;
-        video.currentTime = msg.position;
-        setTimeout(() => state.applyingRemote = false, 200);
+        if (playerCtl) playerCtl.seek(msg.position);
         appendSystem(`${username} перемотал на ${Math.round(msg.position)}с`);
       } else if (msg.type === "chat") {
         await appendChat(msg, true);
@@ -638,23 +801,11 @@ function viewWatch(sessionId) {
     };
   }
 
-  // Local video event listeners → publish to WS
-  video.addEventListener("play", () => {
+  // Боевая реализация publishLocal — после её установки WS-публикация заработает.
+  publishLocal = (type, position) => {
     if (state.applyingRemote || !state.ws || state.ws.readyState !== 1) return;
-    state.ws.send(JSON.stringify({ type: "play", position: video.currentTime }));
-  });
-  video.addEventListener("pause", () => {
-    if (state.applyingRemote || !state.ws || state.ws.readyState !== 1) return;
-    state.ws.send(JSON.stringify({ type: "pause", position: video.currentTime }));
-  });
-  let lastSeek = 0;
-  video.addEventListener("seeked", () => {
-    if (state.applyingRemote || !state.ws || state.ws.readyState !== 1) return;
-    const now = Date.now();
-    if (now - lastSeek < 200) return; // dedupe
-    lastSeek = now;
-    state.ws.send(JSON.stringify({ type: "seek", position: video.currentTime }));
-  });
+    state.ws.send(JSON.stringify({ type, position }));
+  };
 
   async function appendChat(msg, scroll) {
     const username = await fetchUsername(msg.user_id);

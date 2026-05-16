@@ -16,6 +16,7 @@ class FilmCreate(BaseModel):
     description: str | None = None
     rating: float | None = Field(default=None, ge=0, le=10)
     type: str = Field(default="movie", pattern="^(movie|tv_show)$")
+    video_url: str = ""
     genre_ids: list[UUID] = Field(default_factory=list)
 
 
@@ -25,6 +26,7 @@ class FilmOut(BaseModel):
     description: str | None = None
     rating: float | None = None
     type: str
+    video_url: str = ""
     created_at: datetime
     updated_at: datetime
 

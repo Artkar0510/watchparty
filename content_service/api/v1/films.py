@@ -13,6 +13,9 @@ from schemas.film import FilmCreate, FilmDetailOut, FilmOut, FilmSearchResult
 router = APIRouter()
 
 
+FILM_COLS = "id, title, description, rating, type, video_url, created_at, updated_at"
+
+
 @router.get("", response_model=list[FilmOut])
 async def list_films(
     page: int = Query(default=1, ge=1),
@@ -38,8 +41,7 @@ async def list_films(
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT id, title, description, rating, type, created_at, updated_at "
-            f"FROM film_work ORDER BY {order_col} {order_dir} LIMIT $1 OFFSET $2",
+            f"SELECT {FILM_COLS} FROM film_work ORDER BY {order_col} {order_dir} LIMIT $1 OFFSET $2",
             page_size, offset,
         )
 
@@ -82,7 +84,7 @@ async def get_film(film_id: UUID):
     pool = get_pool()
     async with pool.acquire() as conn:
         film = await conn.fetchrow(
-            "SELECT id, title, description, rating, type, created_at, updated_at FROM film_work WHERE id=$1",
+            f"SELECT {FILM_COLS} FROM film_work WHERE id=$1",
             film_id,
         )
         if not film:
@@ -111,10 +113,11 @@ async def create_film(body: FilmCreate):
     async with pool.acquire() as conn:
         async with conn.transaction():
             film = await conn.fetchrow(
-                """INSERT INTO film_work (id, title, description, rating, type, created_at, updated_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $6)
-                   RETURNING id, title, description, rating, type, created_at, updated_at""",
-                film_id, body.title, body.description, body.rating, body.type, now,
+                f"""INSERT INTO film_work (id, title, description, rating, type, video_url, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+                    RETURNING {FILM_COLS}""",
+                film_id, body.title, body.description, body.rating,
+                body.type, body.video_url, now,
             )
             for genre_id in body.genre_ids:
                 await conn.execute(

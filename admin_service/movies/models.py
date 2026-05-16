@@ -50,6 +50,13 @@ class FilmWork(UUIDMixin, TimeStampedMixin):
     type = models.CharField(
         _("type"), max_length=20, choices=FilmType.choices, default=FilmType.MOVIE
     )
+    video_url = models.CharField(
+        _("Ссылка на видео"),
+        max_length=2048,
+        blank=True,
+        default="",
+        help_text=_("Прямой URL до MP4 или путь /videos/myfile.mp4 для локального файла"),
+    )
     genres = models.ManyToManyField(
         Genre, through="GenreFilmWork", verbose_name=_("genres"), blank=True
     )
