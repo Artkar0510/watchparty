@@ -12,4 +12,6 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1"]
+# JSON-форма (exec form): SIGTERM от `docker stop` доходит до uvicorn напрямую,
+# без промежуточной оболочки sh, которая молча игнорировала бы сигналы.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

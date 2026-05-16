@@ -1,27 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-import httpx
-
-from core.settings import get_settings
 from schemas.session import SessionCreate, SessionOut
 from services import notifier, session_manager
+from services.auth_client import authenticate
 
 router = APIRouter()
-bearer = HTTPBearer()
-
-
-async def authenticate(credentials: HTTPAuthorizationCredentials = Depends(bearer)) -> str:
-    settings = get_settings()
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{settings.auth.service_url}/api/v1/auth/verify",
-            headers={"Authorization": f"Bearer {credentials.credentials}"},
-            timeout=5.0,
-        )
-    if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return resp.json()["user_id"]
 
 
 @router.post("", response_model=SessionOut, status_code=201)

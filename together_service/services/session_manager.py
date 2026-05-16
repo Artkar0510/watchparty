@@ -5,22 +5,18 @@ Session state is stored in Redis:
   session:{id}:chat → list of JSON-encoded chat messages (last 200)
 """
 import json
-from datetime import datetime, timezone
 from uuid import uuid4
 
-from db.redis import get_redis
 from core.settings import get_settings
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from core.utils import utc_now
+from db.redis import get_redis
 
 
 async def create_session(film_id: str, host_id: str, invited: list[str]) -> dict:
     settings = get_settings()
     redis = get_redis()
     session_id = str(uuid4())
-    now = _now()
+    now = utc_now()
 
     await redis.hset(f"session:{session_id}", mapping={
         "film_id": film_id,
@@ -65,18 +61,21 @@ async def update_playback(session_id: str, state: str, position: float) -> None:
 
 
 async def add_participant(session_id: str, user_id: str) -> None:
+    """Add a user to the session's participant set, refreshing its TTL.
+
+    Without ``expire`` here the participants key would inherit only the TTL set
+    at session creation; a late joiner could lose participant data before the
+    main session hash expires.
+    """
+    settings = get_settings()
     redis = get_redis()
     await redis.sadd(f"session:{session_id}:participants", user_id)
-
-
-async def remove_participant(session_id: str, user_id: str) -> None:
-    redis = get_redis()
-    await redis.srem(f"session:{session_id}:participants", user_id)
+    await redis.expire(f"session:{session_id}:participants", settings.app.session_ttl)
 
 
 async def add_chat_message(session_id: str, user_id: str, text: str) -> dict:
     redis = get_redis()
-    msg = {"user_id": user_id, "text": text, "timestamp": _now()}
+    msg = {"user_id": user_id, "text": text, "timestamp": utc_now()}
     await redis.rpush(f"session:{session_id}:chat", json.dumps(msg))
     await redis.ltrim(f"session:{session_id}:chat", -200, -1)
     return msg

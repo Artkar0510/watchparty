@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
+import httpx
 import sentry_sdk
 from fastapi import FastAPI
 
@@ -20,9 +21,13 @@ async def lifespan(app: FastAPI):
     logger.info("together-service starting")
     await init_redis()
     await notifier.init_broker()
-    logger.info("together-service ready")
-    yield
-    logger.info("together-service shutting down")
+    # Один httpx client на весь сервис — экономит TCP-соединения и keep-alive
+    # при верификации токенов. Получают его через зависимость get_http_client.
+    async with httpx.AsyncClient(timeout=5.0) as http_client:
+        app.state.http_client = http_client
+        logger.info("together-service ready")
+        yield
+        logger.info("together-service shutting down")
     await notifier.close_broker()
     await close_redis()
 

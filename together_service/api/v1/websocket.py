@@ -6,8 +6,13 @@ together-service subscribes to a per-session channel and forwards messages to
 its locally-connected WebSocket clients only. This makes the service horizontally
 scalable — clients in session X may be split across multiple instances.
 
-Protocol (JSON messages):
+Auth: token is delivered as the FIRST message after the socket is accepted,
+not as a query string. Putting JWTs in URLs leaks them into nginx/uvicorn
+access logs, browser history and Referer headers.
+
+Wire protocol (JSON messages):
   Client → Server:
+    {"type": "auth",  "token": "<jwt>"}    — REQUIRED first message
     {"type": "play",  "position": 12.5}
     {"type": "pause", "position": 12.5}
     {"type": "seek",  "position": 60.0}
@@ -25,14 +30,13 @@ Protocol (JSON messages):
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
 
-import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from core.settings import get_settings
+from core.utils import utc_now
 from db.redis import get_redis
 from services import session_manager
+from services.auth_client import verify_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -43,29 +47,12 @@ _local_connections: dict[str, dict[str, WebSocket]] = {}
 # session_id -> asyncio.Task running the Redis subscriber
 _subscribers: dict[str, asyncio.Task] = {}
 
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+# How long we wait for the client to send the auth frame after connecting.
+AUTH_TIMEOUT_SECONDS = 10.0
 
 
 def _channel(session_id: str) -> str:
     return f"session:{session_id}:events"
-
-
-async def verify_token(token: str) -> str | None:
-    settings = get_settings()
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{settings.auth.service_url}/api/v1/auth/verify",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=5.0,
-            )
-        if resp.status_code == 200:
-            return resp.json()["user_id"]
-    except httpx.HTTPError as exc:
-        logger.warning("Token verification failed: %s", exc)
-    return None
 
 
 async def _fanout_to_local(session_id: str, payload: str) -> None:
@@ -124,29 +111,75 @@ async def _stop_subscriber_if_idle(session_id: str) -> None:
             task.cancel()
 
 
+async def _safe_close(websocket: WebSocket, code: int, reason: str) -> None:
+    """Close the WS but swallow errors if peer already disconnected.
+
+    Without this, ``await websocket.close()`` after a remote-side disconnect
+    raises RuntimeError("Unexpected ASGI message 'websocket.close', after
+    sending 'websocket.close' or response already completed.") and Sentry/logs
+    fill up with noise.
+    """
+    try:
+        await websocket.close(code=code, reason=reason)
+    except Exception as exc:
+        logger.debug("Suppressed close() error (peer likely already gone): %s", exc)
+
+
+async def _read_auth_frame(websocket: WebSocket) -> tuple[str | None, bool]:
+    """Read the first frame; expect ``{"type": "auth", "token": "..."}``.
+
+    Returns ``(token_or_None, peer_disconnected)``. When ``peer_disconnected``
+    is True, the caller must not call ``websocket.close()``.
+    """
+    try:
+        raw = await asyncio.wait_for(
+            websocket.receive_text(), timeout=AUTH_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        return None, False
+    except WebSocketDisconnect:
+        return None, True
+    try:
+        msg = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, False
+    if msg.get("type") != "auth":
+        return None, False
+    token = msg.get("token")
+    if isinstance(token, str) and token:
+        return token, False
+    return None, False
+
+
 @router.websocket("/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str = ""):
-    user_id = await verify_token(token)
+async def websocket_endpoint(websocket: WebSocket, session_id: str):
+    # Accept first so we can read the auth frame; reject afterwards if invalid.
+    await websocket.accept()
+
+    token, peer_gone = await _read_auth_frame(websocket)
+    if peer_gone:
+        return
+    http_client = websocket.app.state.http_client
+    user_id = await verify_token(token or "", http_client)
     if not user_id:
-        await websocket.close(code=4001, reason="Unauthorized")
+        await _safe_close(websocket, code=4001, reason="Unauthorized")
         return
 
     session = await session_manager.get_session(session_id)
     if not session:
-        await websocket.close(code=4004, reason="Session not found")
+        await _safe_close(websocket, code=4004, reason="Session not found")
         return
 
     if user_id not in session["participants"]:
         await session_manager.add_participant(session_id, user_id)
         session = await session_manager.get_session(session_id)
 
-    await websocket.accept()
     logger.info("WS connect user=%s session=%s", user_id, session_id)
 
     _local_connections.setdefault(session_id, {})[user_id] = websocket
     _ensure_subscriber(session_id)
 
-    join_event = {"type": "join", "user_id": user_id, "session": session, "timestamp": _now()}
+    join_event = {"type": "join", "user_id": user_id, "session": session, "timestamp": utc_now()}
     await session_manager.publish_event(session_id, join_event)
 
     try:
@@ -166,7 +199,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                 await session_manager.update_playback(session_id, state, position)
                 event = {
                     "type": msg_type, "user_id": user_id,
-                    "position": position, "timestamp": _now(),
+                    "position": position, "timestamp": utc_now(),
                 }
                 await session_manager.publish_event(session_id, event)
 
@@ -177,7 +210,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                 await session_manager.update_playback(session_id, state, position)
                 event = {
                     "type": "seek", "user_id": user_id,
-                    "position": position, "timestamp": _now(),
+                    "position": position, "timestamp": utc_now(),
                 }
                 await session_manager.publish_event(session_id, event)
 
@@ -206,7 +239,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
         # Drop the local socket but keep the user in the session participant set —
         # they remain a member (and can fetch chat history) even after disconnect.
         _local_connections.get(session_id, {}).pop(user_id, None)
-        leave_event = {"type": "leave", "user_id": user_id, "timestamp": _now()}
+        leave_event = {"type": "leave", "user_id": user_id, "timestamp": utc_now()}
         try:
             await session_manager.publish_event(session_id, leave_event)
         except Exception:

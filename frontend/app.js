@@ -764,9 +764,16 @@ function viewWatch(sessionId) {
 
   function connectWS() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${proto}//${location.host}/ws/${sessionId}?token=${encodeURIComponent(state.token)}`;
+    // Токен НЕ в query string — он бы утёк в access-логи nginx, в историю
+    // браузера и в Referer. Шлём его первым сообщением после открытия.
+    const url = `${proto}//${location.host}/ws/${sessionId}`;
     state.ws = new WebSocket(url);
-    state.ws.onopen = () => appendSystem("вы подключились");
+    state.ws.onopen = () => {
+      try {
+        state.ws.send(JSON.stringify({ type: "auth", token: state.token }));
+      } catch {}
+      appendSystem("вы подключились");
+    };
     state.ws.onclose = () => appendSystem("соединение закрыто");
     state.ws.onerror = () => toast("WebSocket ошибка", "error");
     state.ws.onmessage = async (ev) => {
