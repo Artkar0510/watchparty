@@ -226,7 +226,7 @@ pytest tests/
 | POST | `/api/v1/sessions` | Создать сессию просмотра |
 | GET | `/api/v1/sessions/{id}` | Состояние сессии |
 | GET | `/api/v1/sessions/{id}/chat` | История чата |
-| WS  | `/ws/{session_id}?token=...` | WebSocket синхронизация |
+| WS  | `/ws/{session_id}` | WebSocket синхронизация (JWT передаётся первым кадром `auth`, см. ниже) |
 
 ### UGC Service
 
@@ -274,9 +274,17 @@ pytest tests/
 
 ## WebSocket протокол
 
-Подключение: `ws://localhost:8000/ws/{session_id}?token={access_token}`
+Подключение: `ws://localhost:8000/ws/{session_id}` (без query‑параметров).
 
-**Клиент → Сервер:**
+**Аутентификация.** Сразу после `onopen` клиент обязан отправить первый кадр с JWT — иначе сервер закроет соединение кодом `4001 Unauthorized` (либо через 10 секунд по таймауту, либо сразу после получения любого другого фрейма):
+
+```json
+{"type": "auth", "token": "<access_token>"}
+```
+
+Передача токена в query string (`?token=...`) сознательно не используется: такой URL утекает в access‑логи nginx/uvicorn, в историю браузера и в заголовок `Referer`.
+
+**Клиент → Сервер (после успешной аутентификации):**
 
 ```json
 {"type": "play",  "position": 42.5}

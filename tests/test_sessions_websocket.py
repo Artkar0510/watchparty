@@ -10,6 +10,16 @@ import websockets
 WS_URL = os.getenv("WS_URL", "ws://localhost:8000")
 
 
+async def _authenticate(ws: websockets.WebSocketClientProtocol, token: str) -> None:
+    """Send the mandatory first frame with the JWT.
+
+    The server expects ``{"type": "auth", "token": "<jwt>"}`` immediately after
+    accepting the connection. We deliberately do not put the token in the URL
+    query string (it would leak into access logs / browser history / Referer).
+    """
+    await ws.send(json.dumps({"type": "auth", "token": token}))
+
+
 async def _recv_until(ws: websockets.WebSocketClientProtocol, msg_type: str,
                        timeout: float = 5.0) -> dict:
     """Receive messages until one matching msg_type arrives."""
@@ -49,11 +59,14 @@ async def test_websocket_play_pause_chat(http: httpx.AsyncClient, friends: tuple
     )
     session_id = r.json()["session_id"]
 
-    alice_ws_url = f"{WS_URL}/ws/{session_id}?token={alice['access_token']}"
-    bob_ws_url = f"{WS_URL}/ws/{session_id}?token={bob['access_token']}"
+    ws_url = f"{WS_URL}/ws/{session_id}"
 
-    async with websockets.connect(alice_ws_url) as alice_ws, \
-               websockets.connect(bob_ws_url) as bob_ws:
+    async with websockets.connect(ws_url) as alice_ws, \
+               websockets.connect(ws_url) as bob_ws:
+
+        # Send auth frame first — server stays silent until it sees a valid one.
+        await _authenticate(alice_ws, alice["access_token"])
+        await _authenticate(bob_ws, bob["access_token"])
 
         # Both should see each other's join (via Redis fan-out, possibly async)
         await asyncio.sleep(0.5)
